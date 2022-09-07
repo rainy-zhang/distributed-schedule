@@ -15,7 +15,11 @@ import org.springframework.stereotype.Component;
 
 import java.lang.reflect.Method;
 import java.time.Duration;
+import java.time.LocalDate;
 import java.time.LocalDateTime;
+import java.time.format.DateTimeFormatter;
+import java.time.temporal.ChronoUnit;
+import java.time.temporal.TemporalUnit;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Optional;
@@ -31,10 +35,10 @@ public class ScheduleAspect {
     @Value(value = "${spring.application.name}")
     private String appId;
 
-    private final Map<Scheduled, Duration> timeouts = new HashMap<>();
+    private final Map<Scheduled, LocalDateTime> timeouts = new HashMap<>();
     private long fixedDelay;
     private String fixedDelayString;
-    private String taskId;
+    private String key;
 
     private final ScheduleLock scheduleLock;
     private final Environment environment;
@@ -50,6 +54,7 @@ public class ScheduleAspect {
 
     @Around("schedulePoint()")
     public void handleAround(ProceedingJoinPoint pjp) throws Throwable {
+        LocalDateTime now = LocalDateTime.now();
         Class<?> targetClass = pjp.getTarget().getClass();
         // 获取方法签名
         MethodSignature methodSignature = (MethodSignature) pjp.getSignature();
@@ -58,19 +63,22 @@ public class ScheduleAspect {
 
         // 完整的方法名作为任务ID
         String taskId = method.toGenericString();
-        this.taskId = taskId;
+        
 
         // 获取定时任务间隔时间，作为锁的超时时间
-        Duration timeout = getTimeout(scheduled);
-
-        if (timeout == null) {
-            // timeout == null说明任务间隔时间是以执行完毕后的时间点为准，这里先临时把锁时间设置为5秒，等任务执行完毕后再更新锁时间 
-            // 这里的锁超时时间一定要大于定时任务的执行时间，否则可能出现锁过期
-            timeout = Duration.ofMillis(5000);
+        LocalDateTime next = getTimeout(scheduled);
+        
+        if (next == null) {
+            // next == null说明任务间隔时间是以执行完毕后的时间点为准，先把fixedDelay指定的时间作为锁时间，任务执行完毕后再更新锁时间 
+            next = now.plus(getFixedDelay(), ChronoUnit.MILLIS);
         }
+        Duration timeout = Duration.between(now, next);
 
-        if (!scheduleLock.lock(taskId, appId, timeout)) {
-            System.out.println("redis not empty: " + taskId);
+        // 时间取整，比如每10秒执行一次的任务，对其当前执行时间中的秒数取整
+        LocalDateTime roundText = roundTaskTime(now, timeout.toMillis());
+        this.key = String.format("%s:%s", roundText.format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss")), taskId);
+        if (!scheduleLock.lock(key, appId, timeout)) {
+            System.out.println("redis not empty: " + key);
             return;
         }
         pjp.proceed();
@@ -78,42 +86,45 @@ public class ScheduleAspect {
 
     @After("schedulePoint()")
     public void after() {
-        Duration timeout = null;
+        Duration timeout = Duration.ofMillis(getFixedDelay());
+        if (timeout.toMillis() > 0) {
+            if (!scheduleLock.updateExpire(key, timeout)) {
+                System.err.println("update expire failed, key: " + key);
+            }
+        }
+    }
+
+    private long getFixedDelay() {
+        long timeout = 0;
         if (fixedDelay > -1) {
-            timeout = Duration.ofMillis(fixedDelay);
+            timeout = fixedDelay;
         } else if (!fixedDelayString.isEmpty()) {
             // 处理占位符
             if (fixedDelayString.contains("$")) {
                 fixedDelayString = Optional.ofNullable(environment.getProperty(fixedDelayString.substring(fixedDelayString.indexOf("{") + 1, fixedDelayString.indexOf("}")))).orElseThrow(() -> new RuntimeException(fixedDelayString + "not found"));
             }
-            timeout = Duration.ofMillis(Long.parseLong(fixedDelayString));
+            timeout = Long.parseLong(fixedDelayString);
         }
-
-        if (timeout != null) {
-            if (!scheduleLock.updateExpire(taskId, timeout)) {
-                System.err.println("update expire failed, taskId: " + taskId);
-            }
-        }
+        return timeout;
     }
 
-
-    private Duration getTimeout(Scheduled scheduled) {
+    private LocalDateTime getTimeout(Scheduled scheduled) {
         return timeouts.computeIfAbsent(scheduled, k -> {
             // 因为fixedDelay和fixedDelayString是任务执行结束后的时间间隔，所以需要任务执行完毕后再加锁
             this.fixedDelay = scheduled.fixedDelay();
             this.fixedDelayString = scheduled.fixedDelayString();
 
+            LocalDateTime now = LocalDateTime.now();
+            
             String cron = scheduled.cron();
             long fixedRate = scheduled.fixedRate();
             String fixedRateString = scheduled.fixedRateString();
 
             if (!cron.isEmpty()) {
-                LocalDateTime now = LocalDateTime.now();
-                LocalDateTime next = CronExpression.parse(cron).next(now);
-                return Duration.between(now, next);
+                return CronExpression.parse(cron).next(now);
             }
             if (fixedRate > -1) {
-                return Duration.ofMillis(fixedRate);
+                return now.plus(fixedRate, ChronoUnit.MILLIS);
             }
             if (!fixedRateString.isEmpty()) {
                 // 处理占位符
@@ -121,10 +132,47 @@ public class ScheduleAspect {
                     String finalFixedRateString = fixedRateString;
                     fixedRateString = Optional.ofNullable(environment.getProperty(fixedRateString.substring(fixedRateString.indexOf("{") + 1, fixedRateString.indexOf("}")))).orElseThrow(() -> new RuntimeException(finalFixedRateString + "not found"));
                 }
-                return Duration.ofMillis(Long.parseLong(fixedRateString));
+                return now.plus(Long.parseLong(fixedRateString), ChronoUnit.MILLIS);
             }
             return null;
         });
     }
+    
+    private LocalDateTime roundTaskTime(LocalDateTime now, long intervalMillis) {
+        long secondMillis = 1000;
+        long minuteMillis = 60 * secondMillis;
+        long hourMillis = 60 * minuteMillis;
+        long dayMillis = 24 * hourMillis;
+        long monthMillis = 30 * dayMillis;
+
+        if (intervalMillis >= monthMillis) { 
+            int month = now.getMonthValue();
+            long intervalMonth = (intervalMillis / monthMillis);
+            return now.withMonth((int) ((month / intervalMonth) * intervalMonth));
+        }
+        if (intervalMillis >= dayMillis) {
+            int day = now.getDayOfMonth();
+            long intervalDay = (intervalMillis / dayMillis);
+            return now.withDayOfMonth((int) ((day / intervalDay) * intervalDay));
+        }
+        if (intervalMillis >= hourMillis) {
+            int hour = now.getHour();
+            long intervalHour = (intervalMillis / hourMillis);
+            return now.withHour((int) ((hour / intervalHour) * intervalHour));
+        }
+        if (intervalMillis >= minuteMillis) {
+            int minute = now.getMinute();
+            long intervalMinute = (intervalMillis / minuteMillis);
+            return now.withMinute((int) ((minute / intervalMinute) * intervalMinute));
+        }
+        if (intervalMillis >= secondMillis) {
+            int second = now.getSecond();
+            long intervalSecond = (intervalMillis / secondMillis);
+            return now.withSecond((int) ((second / intervalSecond) * intervalSecond));
+        }
+        
+        return now;
+    }
+
 
 }
