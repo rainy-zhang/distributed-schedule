@@ -15,11 +15,9 @@ import org.springframework.stereotype.Component;
 
 import java.lang.reflect.Method;
 import java.time.Duration;
-import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 import java.time.temporal.ChronoUnit;
-import java.time.temporal.TemporalUnit;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Optional;
@@ -63,11 +61,11 @@ public class ScheduleAspect {
 
         // 完整的方法名作为任务ID
         String taskId = method.toGenericString();
-        
+
 
         // 获取定时任务间隔时间，作为锁的超时时间
         LocalDateTime next = getTimeout(scheduled);
-        
+
         if (next == null) {
             // next == null说明任务间隔时间是以执行完毕后的时间点为准，先把fixedDelay指定的时间作为锁时间，任务执行完毕后再更新锁时间 
             next = now.plus(getFixedDelay(), ChronoUnit.MILLIS);
@@ -115,7 +113,7 @@ public class ScheduleAspect {
             this.fixedDelayString = scheduled.fixedDelayString();
 
             LocalDateTime now = LocalDateTime.now();
-            
+
             String cron = scheduled.cron();
             long fixedRate = scheduled.fixedRate();
             String fixedRateString = scheduled.fixedRateString();
@@ -137,7 +135,7 @@ public class ScheduleAspect {
             return null;
         });
     }
-    
+
     private LocalDateTime roundTaskTime(LocalDateTime now, long intervalMillis) {
         long secondMillis = 1000;
         long minuteMillis = 60 * secondMillis;
@@ -145,7 +143,7 @@ public class ScheduleAspect {
         long dayMillis = 24 * hourMillis;
         long monthMillis = 30 * dayMillis;
 
-        if (intervalMillis >= monthMillis) { 
+        if (intervalMillis >= monthMillis) {
             int month = now.getMonthValue();
             long intervalMonth = (intervalMillis / monthMillis);
             return now.withMonth((int) ((month / intervalMonth) * intervalMonth));
@@ -170,7 +168,7 @@ public class ScheduleAspect {
             long intervalSecond = (intervalMillis / secondMillis);
             return now.withSecond((int) ((second / intervalSecond) * intervalSecond));
         }
-        
+
         return now;
     }
 
