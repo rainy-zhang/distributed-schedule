@@ -50,8 +50,6 @@ public class ScheduleAspect {
 
     @Around("schedulePoint()")
     public void handleAround(ProceedingJoinPoint pjp) throws Throwable {
-        System.out.println("------------------------------");
-        System.out.println("start: " + System.currentTimeMillis());
         Class<?> targetClass = pjp.getTarget().getClass();
         // 获取方法签名
         MethodSignature methodSignature = (MethodSignature) pjp.getSignature();
@@ -67,6 +65,7 @@ public class ScheduleAspect {
 
         if (timeout == null) {
             // timeout == null说明任务间隔时间是以执行完毕后的时间点为准，这里先临时把锁时间设置为5秒，等任务执行完毕后再更新锁时间 
+            // 这里的锁超时时间一定要大于定时任务的执行时间，否则可能出现锁过期
             timeout = Duration.ofMillis(5000);
         }
 
@@ -91,8 +90,8 @@ public class ScheduleAspect {
         }
 
         if (timeout != null) {
-            if (scheduleLock.updateExpire(taskId, timeout)) {
-                System.out.println("update expire: " + taskId);
+            if (!scheduleLock.updateExpire(taskId, timeout)) {
+                System.err.println("update expire failed, taskId: " + taskId);
             }
         }
     }
