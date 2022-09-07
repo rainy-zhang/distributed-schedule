@@ -7,10 +7,8 @@ import org.aspectj.lang.annotation.Aspect;
 import org.aspectj.lang.annotation.Pointcut;
 import org.aspectj.lang.reflect.MethodSignature;
 import org.rainy.schedule.lock.ScheduleLock;
-import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.core.env.Environment;
-import org.springframework.data.redis.core.RedisTemplate;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.scheduling.support.CronExpression;
 import org.springframework.stereotype.Component;
@@ -21,7 +19,6 @@ import java.time.LocalDateTime;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Optional;
-import java.util.concurrent.TimeUnit;
 
 /**
  * @author zhangyu
@@ -33,9 +30,6 @@ public class ScheduleAspect {
 
     @Value(value = "${spring.application.name}")
     private String appId;
-
-    @Autowired
-    private RedisTemplate<String, String> redisTemplate;
 
     private final Map<Scheduled, Duration> timeouts = new HashMap<>();
     private long fixedDelay;
@@ -77,10 +71,7 @@ public class ScheduleAspect {
         }
 
         if (!scheduleLock.lock(taskId, appId, timeout)) {
-            System.out.println(appId + "-"+ taskId  +": redis not empty");
-
-            System.out.println("expire: "+redisTemplate.getExpire(taskId, TimeUnit.MILLISECONDS));
-            
+            System.out.println("redis not empty: " + taskId);
             return;
         }
         pjp.proceed();
@@ -101,7 +92,7 @@ public class ScheduleAspect {
 
         if (timeout != null) {
             if (scheduleLock.updateExpire(taskId, timeout)) {
-                System.out.println(appId + "-"+ taskId  +": update expire");
+                System.out.println("update expire: " + taskId);
             }
         }
     }
